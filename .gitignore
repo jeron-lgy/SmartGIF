@@ -1,6 +1,7 @@
 # Runtime input and generated output
 /uploads/
 /outputs/
+/data/
 /*.mp4
 /*.mov
 /*.mkv

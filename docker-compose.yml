@@ -1,0 +1,9 @@
+services:
+  animation-converter:
+    build:
+      context: .
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

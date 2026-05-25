@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import threading
 import time
 import uuid
@@ -30,8 +31,9 @@ from animation_converter import (
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIST = ROOT / "webui" / "dist"
-UPLOADS = ROOT / "uploads"
-OUTPUTS = ROOT / "outputs"
+DATA_ROOT = Path(os.environ.get("ANIMATION_DATA_DIR", ROOT)).expanduser().resolve()
+UPLOADS = DATA_ROOT / "uploads"
+OUTPUTS = DATA_ROOT / "outputs"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
 MEDIA_MIMES = {
     ".apng": "image/apng",
@@ -69,11 +71,6 @@ JOBS: dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
 
 
-def media_url(path: Path) -> str:
-    relative = path.resolve().relative_to(ROOT).as_posix()
-    return "/media/" + quote(relative)
-
-
 def is_within(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -82,8 +79,35 @@ def is_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def stored_reference(path: Path) -> str:
+    path = path.resolve()
+    locations = (("root", ROOT),) if DATA_ROOT == ROOT else (("data", DATA_ROOT), ("root", ROOT))
+    for scope, parent in locations:
+        if is_within(path, parent):
+            relative = path.relative_to(parent).as_posix()
+            return f"{scope}/{relative}"
+    raise ValueError("文件不在允许的存储目录中。")
+
+
+def stored_path(reference: str) -> Path:
+    scope, separator, relative = reference.partition("/")
+    if separator and scope in {"root", "data"}:
+        parent = ROOT if scope == "root" else DATA_ROOT
+    else:
+        parent = ROOT
+        relative = reference
+    candidate = (parent / relative).resolve()
+    if not is_within(candidate, parent):
+        raise ValueError("文件路径无效。")
+    return candidate
+
+
+def media_url(path: Path) -> str:
+    return "/media/" + quote(stored_reference(path))
+
+
 def allowed_input(relative: str) -> Path:
-    path = (ROOT / relative).resolve()
+    path = stored_path(relative)
     if path.suffix.lower() not in VIDEO_EXTENSIONS or not path.is_file():
         raise ValueError("输入文件不存在或不是支持的视频格式。")
     if path.parent == ROOT or is_within(path, UPLOADS):
@@ -94,7 +118,7 @@ def allowed_input(relative: str) -> Path:
 def video_item(path: Path) -> dict[str, object]:
     info = probe_video(path)
     return {
-        "path": path.resolve().relative_to(ROOT).as_posix(),
+        "path": stored_reference(path),
         "name": path.name,
         "url": media_url(path),
         "size": path.stat().st_size,
@@ -263,7 +287,7 @@ class AppHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length <= 0:
             raise ValueError("上传文件为空。")
-        UPLOADS.mkdir(exist_ok=True)
+        UPLOADS.mkdir(parents=True, exist_ok=True)
         unique = f"{int(time.time())}_{name}"
         destination = UPLOADS / unique
         remaining = length
@@ -309,10 +333,13 @@ class AppHandler(BaseHTTPRequestHandler):
         self.json_response(serialized_job(job), HTTPStatus.ACCEPTED)
 
     def send_media(self, raw_relative: str) -> None:
-        candidate = (ROOT / unquote(raw_relative)).resolve()
+        try:
+            candidate = stored_path(unquote(raw_relative))
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
         if (
-            not is_within(candidate, ROOT)
-            or not candidate.is_file()
+            not candidate.is_file()
             or candidate.suffix.lower() not in PUBLIC_MEDIA_EXTENSIONS
         ):
             self.send_error(HTTPStatus.NOT_FOUND)
