@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import mimetypes
 import os
@@ -182,6 +183,37 @@ def serialized_job(job: Job) -> dict[str, object]:
         }
 
 
+def preview_document(job: Job) -> bytes:
+    with job.lock:
+        if job.status != "done" or not job.results:
+            raise ValueError("转换尚未完成，暂时无法查看对比页。")
+        results = list(job.results)
+        source = job.source
+    info = probe_video(source)
+    cards = []
+    for result in results:
+        item = result_item(result, info)
+        detail = f"{item['sizeText']} | {item['width']} x {item['height']} | {item['fps']} fps"
+        cards.append(
+            f"""<article><div class="title"><b>{html.escape(str(item['label']))}</b>
+            <span>{html.escape(detail)}</span><a href="{html.escape(str(item['url']))}" download>下载</a></div>
+            <div class="stage"><img src="{html.escape(str(item['url']))}" alt="{html.escape(str(item['label']))}"></div></article>"""
+        )
+    document = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(source.stem)} - 动图对比</title>
+<style>
+*{{box-sizing:border-box}}body{{margin:0;background:#0f1217;color:#f2f4f8;font:14px -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI","Segoe UI",sans-serif}}
+header{{position:sticky;top:0;z-index:1;padding:18px 24px;background:#0f1217eb;border-bottom:1px solid #29303d;backdrop-filter:blur(15px)}}
+h1{{font-size:22px;margin:0 0 6px}}p{{margin:0;color:#aab3c2}}main{{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;padding:18px}}
+article{{background:#171c24;border:1px solid #2a3342;border-radius:14px;overflow:hidden}}.title{{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid #2a3342}}
+.title b{{font-size:18px}}.title span{{color:#aab3c2;flex:1}}.title a{{color:#64adff;text-decoration:none}}.stage{{height:min(72vh,760px);padding:10px;background:#080a0e;display:flex;justify-content:center}}
+img{{width:100%;height:100%;object-fit:contain}}
+</style></head><body><header><h1>动图转换效果对比</h1><p>输入文件：{html.escape(source.name)}；所有输出同步循环播放。</p></header>
+<main>{''.join(cards)}</main></body></html>"""
+    return document.encode("utf-8")
+
+
 def run_job(job: Job, settings: ConversionSettings) -> None:
     job.status = "running"
     try:
@@ -249,6 +281,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.json_response({"error": "任务不存在。"}, HTTPStatus.NOT_FOUND)
                 return
             self.json_response(serialized_job(job))
+            return
+        if route.startswith("/preview/"):
+            self.send_preview(route.removeprefix("/preview/").split("/", 1)[0])
             return
         if route.startswith("/media/"):
             self.send_media(route.removeprefix("/media/"))
@@ -354,6 +389,24 @@ class AppHandler(BaseHTTPRequestHandler):
         with candidate.open("rb") as content:
             while chunk := content.read(1024 * 1024):
                 self.wfile.write(chunk)
+
+    def send_preview(self, job_id: str) -> None:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+        if not job:
+            self.send_error(HTTPStatus.NOT_FOUND, "任务不存在。")
+            return
+        try:
+            body = preview_document(job)
+        except ValueError as exc:
+            self.send_error(HTTPStatus.CONFLICT, str(exc))
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_frontend(self, route: str) -> None:
         if not WEB_DIST.exists():

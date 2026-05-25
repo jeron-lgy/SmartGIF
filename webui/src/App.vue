@@ -26,6 +26,7 @@ import {
   FilmOutline,
   FlashOutline,
   ImagesOutline,
+  OpenOutline,
   OptionsOutline,
   PlayCircleOutline,
   RefreshOutline,
@@ -99,6 +100,7 @@ const sourceOptions = computed(() =>
   }))
 )
 const logs = computed(() => job.value?.logs || [])
+const previewUrl = computed(() => (job.value?.status === 'done' ? `/preview/${job.value.id}` : null))
 const progress = computed(() => {
   if (!job.value) return 0
   if (job.value.status === 'done') return 100
@@ -304,15 +306,26 @@ onBeforeUnmount(() => clearInterval(timer))
               </n-button>
             </n-upload>
           </div>
-          <div v-if="selectedVideo" class="source-meta">
+          <div class="source-meta" :class="{ empty: !selectedVideo }">
             <div class="video-frame">
-              <video :src="selectedVideo.url" controls muted preload="metadata" />
+              <video v-if="selectedVideo" :src="selectedVideo.url" controls muted preload="metadata" />
+              <div v-else class="video-placeholder">
+                <n-icon><film-outline /></n-icon>
+                <strong>等待导入视频</strong>
+                <span>导入视频后将在这里预览源画面</span>
+              </div>
             </div>
-            <div class="metadata">
+            <div v-if="selectedVideo" class="metadata">
               <span>{{ selectedVideo.width }} x {{ selectedVideo.height }}</span>
               <span>{{ selectedVideo.fps }} fps</span>
               <span>{{ selectedVideo.duration }} 秒</span>
               <span>{{ selectedVideo.sizeText }}</span>
+            </div>
+            <div v-else class="metadata metadata-placeholder" aria-hidden="true">
+              <span>分辨率</span>
+              <span>帧率</span>
+              <span>时长</span>
+              <span>体积</span>
             </div>
           </div>
           <div class="section-title format-heading-title">
@@ -466,28 +479,38 @@ onBeforeUnmount(() => clearInterval(timer))
             <p class="eyebrow">OUTPUT GALLERY</p>
             <h2>效果对比</h2>
           </div>
-          <p v-if="results.length">同屏播放，直接比较细节和动作流畅度</p>
+          <div class="gallery-action">
+            <p class="gallery-message">
+              {{ results.length ? '新页面同屏播放，比较细节与流畅度' : '完成转换后可打开同屏预览页' }}
+            </p>
+            <n-button
+              v-if="previewUrl"
+              tag="a"
+              :href="previewUrl"
+              target="_blank"
+              rel="noopener"
+              type="primary"
+            >
+              <template #icon><n-icon><open-outline /></n-icon></template>
+              新页查看对比
+            </n-button>
+            <n-button v-else disabled>
+              <template #icon><n-icon><open-outline /></n-icon></template>
+              新页查看对比
+            </n-button>
+          </div>
         </div>
-        <div v-if="results.length" class="result-grid">
-          <article v-for="item in results" :key="item.format" class="result-card">
-            <div class="result-header">
-              <div>
-                <strong>{{ item.label }}</strong>
-                <n-tag size="small" :bordered="false">{{ item.sizeText }}</n-tag>
-              </div>
-              <a :href="item.url" :download="item.name">下载</a>
+        <div v-if="results.length" class="comparison-files">
+          <article v-for="item in results" :key="item.format" class="comparison-file">
+            <div>
+              <strong>{{ item.label }}</strong>
+              <span>{{ item.sizeText }}</span>
+              <small>{{ item.width }} x {{ item.height }} · {{ item.fps }} fps · {{ qualityDetail(item) }}</small>
             </div>
-            <div class="result-stage">
-              <img :src="item.url" :alt="`${item.label} 动图输出`">
-            </div>
-            <div class="result-meta">
-              <span>{{ item.width }} x {{ item.height }}</span>
-              <span>{{ item.fps }} fps</span>
-              <span>{{ qualityDetail(item) }}</span>
-            </div>
+            <a :href="item.url" :download="item.name">下载</a>
           </article>
         </div>
-        <n-empty v-else class="empty-results" description="完成转换后，这里会同屏显示输出效果" />
+        <n-empty v-else class="empty-results" description="完成转换后，打开新页面查看同屏效果" />
       </section>
     </div>
   </n-config-provider>
