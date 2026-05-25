@@ -1,0 +1,29 @@
+# Runtime input and generated output
+/uploads/
+/outputs/
+/*.mp4
+/*.mov
+/*.mkv
+/*.avi
+/*.webm
+/*.m4v
+/*.flv
+/*.gif
+/*.webp
+/*.apng
+/*.avif
+/动图对比预览.html
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Frontend dependencies and local build cache
+/webui/node_modules/
+/webui/.vite/
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

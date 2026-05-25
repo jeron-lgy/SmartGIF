@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""Local web server for the animated image converter."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import threading
+import time
+import uuid
+import webbrowser
+from dataclasses import dataclass, field
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
+
+from animation_converter import (
+    CancelledError,
+    ConversionResult,
+    ConversionSettings,
+    Converter,
+    FORMAT_LABELS,
+    PRESETS,
+    format_bytes,
+    probe_video,
+)
+
+
+ROOT = Path(__file__).resolve().parent
+WEB_DIST = ROOT / "webui" / "dist"
+UPLOADS = ROOT / "uploads"
+OUTPUTS = ROOT / "outputs"
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
+MEDIA_MIMES = {
+    ".apng": "image/apng",
+    ".avif": "image/avif",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+}
+PUBLIC_MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | {".apng", ".avif", ".gif", ".webp"}
+
+
+@dataclass
+class Job:
+    id: str
+    source: Path
+    formats: tuple[str, ...]
+    target_bytes: int | None
+    status: str = "queued"
+    logs: list[str] = field(default_factory=list)
+    results: list[ConversionResult] = field(default_factory=list)
+    error: str | None = None
+    created_at: float = field(default_factory=time.time)
+    cancel: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def add_log(self, message: str) -> None:
+        with self.lock:
+            self.logs.append(message)
+
+
+JOBS: dict[str, Job] = {}
+JOBS_LOCK = threading.Lock()
+
+
+def media_url(path: Path) -> str:
+    relative = path.resolve().relative_to(ROOT).as_posix()
+    return "/media/" + quote(relative)
+
+
+def is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def allowed_input(relative: str) -> Path:
+    path = (ROOT / relative).resolve()
+    if path.suffix.lower() not in VIDEO_EXTENSIONS or not path.is_file():
+        raise ValueError("输入文件不存在或不是支持的视频格式。")
+    if path.parent == ROOT or is_within(path, UPLOADS):
+        return path
+    raise ValueError("仅允许转换工作目录或上传目录中的视频。")
+
+
+def video_item(path: Path) -> dict[str, object]:
+    info = probe_video(path)
+    return {
+        "path": path.resolve().relative_to(ROOT).as_posix(),
+        "name": path.name,
+        "url": media_url(path),
+        "size": path.stat().st_size,
+        "sizeText": format_bytes(path.stat().st_size),
+        "width": info.width,
+        "height": info.height,
+        "fps": round(info.fps, 2),
+        "duration": round(info.duration, 2),
+    }
+
+
+def list_videos() -> list[dict[str, object]]:
+    candidates = [
+        path for path in ROOT.iterdir() if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+    if UPLOADS.exists():
+        candidates.extend(
+            path for path in UPLOADS.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+        )
+    items = []
+    for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            items.append(video_item(path))
+        except RuntimeError:
+            continue
+    return items
+
+
+def result_item(result: ConversionResult, source_info: object) -> dict[str, object]:
+    height = round(source_info.height * result.params.width / source_info.width)
+    if height % 2:
+        height += 1
+    return {
+        "format": result.fmt,
+        "label": FORMAT_LABELS[result.fmt],
+        "url": media_url(result.path),
+        "name": result.path.name,
+        "size": result.size,
+        "sizeText": format_bytes(result.size),
+        "width": result.params.width,
+        "height": height,
+        "fps": round(result.params.fps, 2),
+        "colors": result.params.colors,
+        "webpQuality": result.params.webp_quality,
+        "avifCrf": result.params.avif_crf,
+    }
+
+
+def serialized_job(job: Job) -> dict[str, object]:
+    with job.lock:
+        info = probe_video(job.source) if job.results else None
+        return {
+            "id": job.id,
+            "status": job.status,
+            "source": job.source.name,
+            "formats": list(job.formats),
+            "targetBytes": job.target_bytes,
+            "logs": list(job.logs),
+            "results": [result_item(result, info) for result in job.results] if info else [],
+            "error": job.error,
+        }
+
+
+def run_job(job: Job, settings: ConversionSettings) -> None:
+    job.status = "running"
+    try:
+        converter = Converter(job.source, settings, job.add_log, job.cancel)
+        results, _preview = converter.convert_all()
+        with job.lock:
+            job.results = results
+            job.status = "done"
+    except CancelledError:
+        with job.lock:
+            job.status = "cancelled"
+            job.logs.append("操作已取消。")
+    except Exception as exc:
+        with job.lock:
+            job.status = "error"
+            job.error = str(exc)
+            job.logs.append("错误：" + str(exc))
+
+
+class AppHandler(BaseHTTPRequestHandler):
+    server_version = "AnimationConverter/1.0"
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+    def json_response(self, payload: object, status: int = 200) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def read_json(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 1_000_000:
+            raise ValueError("请求内容过大。")
+        return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+
+    def do_GET(self) -> None:  # noqa: N802
+        route = urlparse(self.path).path
+        if route == "/api/health":
+            self.json_response({"ok": True})
+            return
+        if route == "/api/config":
+            self.json_response(
+                {
+                    "presets": PRESETS,
+                    "formats": [
+                        {"value": key, "label": label} for key, label in FORMAT_LABELS.items()
+                    ],
+                    "videos": list_videos(),
+                }
+            )
+            return
+        if route == "/api/videos":
+            self.json_response({"videos": list_videos()})
+            return
+        if route.startswith("/api/jobs/"):
+            job_id = route.removeprefix("/api/jobs/").split("/", 1)[0]
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+            if not job:
+                self.json_response({"error": "任务不存在。"}, HTTPStatus.NOT_FOUND)
+                return
+            self.json_response(serialized_job(job))
+            return
+        if route.startswith("/media/"):
+            self.send_media(route.removeprefix("/media/"))
+            return
+        self.send_frontend(route)
+
+    def do_POST(self) -> None:  # noqa: N802
+        route = urlparse(self.path).path
+        try:
+            if route == "/api/upload":
+                self.handle_upload()
+                return
+            if route == "/api/jobs":
+                self.handle_new_job()
+                return
+            if route.startswith("/api/jobs/") and route.endswith("/cancel"):
+                job_id = route.removeprefix("/api/jobs/").removesuffix("/cancel").strip("/")
+                with JOBS_LOCK:
+                    job = JOBS.get(job_id)
+                if not job:
+                    self.json_response({"error": "任务不存在。"}, HTTPStatus.NOT_FOUND)
+                    return
+                job.cancel.set()
+                self.json_response({"ok": True})
+                return
+            self.json_response({"error": "接口不存在。"}, HTTPStatus.NOT_FOUND)
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            self.json_response({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_upload(self) -> None:
+        name = Path(unquote(self.headers.get("X-File-Name", ""))).name
+        if not name or Path(name).suffix.lower() not in VIDEO_EXTENSIONS:
+            raise ValueError("请选择支持的视频文件。")
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            raise ValueError("上传文件为空。")
+        UPLOADS.mkdir(exist_ok=True)
+        unique = f"{int(time.time())}_{name}"
+        destination = UPLOADS / unique
+        remaining = length
+        with destination.open("wb") as output:
+            while remaining:
+                chunk = self.rfile.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("上传中断。")
+                output.write(chunk)
+                remaining -= len(chunk)
+        self.json_response({"video": video_item(destination)}, HTTPStatus.CREATED)
+
+    def handle_new_job(self) -> None:
+        data = self.read_json()
+        source = allowed_input(str(data.get("source", "")))
+        formats = tuple(str(value) for value in data.get("formats", []))
+        if not formats or set(formats) - set(FORMAT_LABELS):
+            raise ValueError("请选择有效的输出格式。")
+        target_mb = data.get("targetMb")
+        target_bytes = int(float(target_mb) * 1_000_000) if target_mb else None
+        if target_bytes is not None and target_bytes <= 0:
+            raise ValueError("目标大小必须大于 0。")
+        job_id = uuid.uuid4().hex[:12]
+        output_dir = OUTPUTS / job_id
+        settings = ConversionSettings(
+            formats=formats,
+            output_dir=output_dir,
+            max_width=max(0, int(data.get("maxWidth", 0))),
+            max_fps=max(0.0, float(data.get("maxFps", 0))),
+            colors=min(256, max(16, int(data.get("colors", 256)))),
+            webp_quality=min(100, max(0, int(data.get("webpQuality", 90)))),
+            avif_crf=min(63, max(0, int(data.get("avifCrf", 16)))),
+            speed=min(8, max(0, int(data.get("speed", 3)))),
+            target_bytes=target_bytes,
+            auto_optimize=bool(data.get("autoOptimize", True)),
+            make_preview=False,
+        )
+        job = Job(job_id, source, formats, target_bytes)
+        with JOBS_LOCK:
+            JOBS[job_id] = job
+        thread = threading.Thread(target=run_job, args=(job, settings), daemon=True)
+        thread.start()
+        self.json_response(serialized_job(job), HTTPStatus.ACCEPTED)
+
+    def send_media(self, raw_relative: str) -> None:
+        candidate = (ROOT / unquote(raw_relative)).resolve()
+        if (
+            not is_within(candidate, ROOT)
+            or not candidate.is_file()
+            or candidate.suffix.lower() not in PUBLIC_MEDIA_EXTENSIONS
+        ):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        mime = MEDIA_MIMES.get(candidate.suffix.lower()) or mimetypes.guess_type(candidate.name)[0]
+        content_type = mime or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(candidate.stat().st_size))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        with candidate.open("rb") as content:
+            while chunk := content.read(1024 * 1024):
+                self.wfile.write(chunk)
+
+    def send_frontend(self, route: str) -> None:
+        if not WEB_DIST.exists():
+            body = (
+                "前端尚未构建。请先在 webui 目录运行 npm.cmd install 和 npm.cmd run build。"
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        relative = route.lstrip("/") or "index.html"
+        candidate = (WEB_DIST / relative).resolve()
+        if not is_within(candidate, WEB_DIST) or not candidate.is_file():
+            candidate = WEB_DIST / "index.html"
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
+        self.send_header("Content-Length", str(candidate.stat().st_size))
+        self.end_headers()
+        self.wfile.write(candidate.read_bytes())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="启动动图转换器网页服务。")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", default=8765, type=int)
+    parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器。")
+    args = parser.parse_args()
+    server = ThreadingHTTPServer((args.host, args.port), AppHandler)
+    url = f"http://{args.host}:{args.port}"
+    print(f"动图转换器已启动：{url}")
+    if not args.no_open:
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
