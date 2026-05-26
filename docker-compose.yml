@@ -1,7 +1,7 @@
 services:
   animation-converter:
-    build:
-      context: .
+    image: ghcr.io/jeron-lgy/smartgif:latest
+    pull_policy: always
     ports:
       - "8765:8765"
     volumes:

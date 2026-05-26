@@ -1,0 +1,6 @@
+services:
+  animation-converter:
+    image: smartgif:local
+    pull_policy: build
+    build:
+      context: .

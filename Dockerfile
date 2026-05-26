@@ -7,6 +7,9 @@ COPY webui/src ./src
 RUN npm run build
 
 FROM python:3.13-slim
+LABEL org.opencontainers.image.source="https://github.com/jeron-lgy/SmartGIF" \
+    org.opencontainers.image.description="Web-based animated image converter for GIF, WebP, APNG and AVIF"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ANIMATION_DATA_DIR=/data
