@@ -64,6 +64,10 @@ PRESETS = {
     },
 }
 PRESET_BY_LABEL = {item["label"]: key for key, item in PRESETS.items()}
+AVIF_AUTO_START_WIDTH = 1200
+AVIF_AUTO_START_FPS = 15
+AVIF_AUTO_MAX_WIDTH = 1600
+AVIF_AUTO_MAX_FPS = 20
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,17 @@ def executable(name: str) -> str:
     return found
 
 
+def supports_encoder(ffmpeg: str, name: str) -> bool:
+    completed = subprocess.run(
+        [ffmpeg, "-hide_banner", "-h", f"encoder={name}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def run_command(command: list[str], cancel: threading.Event | None = None) -> None:
     process = subprocess.Popen(
         command,
@@ -212,6 +227,7 @@ class Converter:
         self.cancel = cancel or threading.Event()
         self.info = probe_video(source)
         self.ffmpeg = executable("ffmpeg")
+        self.has_svt_av1 = supports_encoder(self.ffmpeg, "libsvtav1")
         self.created_temp_files: list[Path] = []
 
     def convert_all(self) -> tuple[list[ConversionResult], Path | None]:
@@ -244,6 +260,12 @@ class Converter:
             elif fmt == "webp" and target_mb <= 20:
                 width = min(width, 1200)
                 fps = min(fps, 24)
+            elif fmt == "avif":
+                width = min(width, AVIF_AUTO_MAX_WIDTH)
+                fps = min(fps, AVIF_AUTO_MAX_FPS)
+                if target_mb <= 20:
+                    width = min(width, AVIF_AUTO_START_WIDTH)
+                    fps = min(fps, AVIF_AUTO_START_FPS)
         return EncodeParams(
             width=even_width(width),
             fps=max(1.0, fps),
@@ -332,25 +354,46 @@ class Converter:
                 str(destination),
             ]
         elif fmt == "avif":
-            cpu_used = max(0, min(8, params.speed))
-            command = common + [
-                "-vf",
-                scale_filter,
-                "-an",
-                "-c:v",
-                "libaom-av1",
-                "-cpu-used",
-                str(cpu_used),
-                "-crf",
-                str(params.avif_crf),
-                "-b:v",
-                "0",
-                "-pix_fmt",
-                "yuv420p10le",
-                "-loop",
-                "0",
-                str(destination),
-            ]
+            if self.settings.auto_optimize and self.settings.target_bytes and self.has_svt_av1:
+                svt_preset = max(4, min(13, params.speed + 5))
+                command = common + [
+                    "-vf",
+                    scale_filter,
+                    "-an",
+                    "-c:v",
+                    "libsvtav1",
+                    "-preset",
+                    str(svt_preset),
+                    "-crf",
+                    str(params.avif_crf),
+                    "-b:v",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p10le",
+                    "-loop",
+                    "0",
+                    str(destination),
+                ]
+            else:
+                cpu_used = max(0, min(8, params.speed))
+                command = common + [
+                    "-vf",
+                    scale_filter,
+                    "-an",
+                    "-c:v",
+                    "libaom-av1",
+                    "-cpu-used",
+                    str(cpu_used),
+                    "-crf",
+                    str(params.avif_crf),
+                    "-b:v",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p10le",
+                    "-loop",
+                    "0",
+                    str(destination),
+                ]
         else:
             raise ValueError(fmt)
         run_command(command, self.cancel)
@@ -362,6 +405,14 @@ class Converter:
         assert target is not None
         cap_width = min(self.settings.max_width or self.info.width, self.info.width)
         cap_fps = min(self.settings.max_fps or self.info.fps, self.info.fps)
+        if fmt == "avif":
+            cap_width = min(cap_width, AVIF_AUTO_MAX_WIDTH)
+            cap_fps = min(cap_fps, AVIF_AUTO_MAX_FPS)
+            encoder_note = "快速 SVT-AV1 编码" if self.has_svt_av1 else "兼容编码"
+            self.log(
+                f"[AVIF] 自动限容使用{encoder_note}，寻优上限为 "
+                f"{cap_width} px / {format_fps(cap_fps)} fps"
+            )
         params = start
         best: ConversionResult | None = None
         seen: set[tuple[int, float, int, int, int]] = set()
