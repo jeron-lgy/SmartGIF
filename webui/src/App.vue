@@ -60,7 +60,7 @@ const { message } = createDiscreteApi(['message'], {
 })
 
 const formatCards = [
-  { key: 'avif', label: 'AVIF', sub: '极致压缩', desc: '同体积保留最多细节，现代平台优选。', tone: 'mint' },
+  { key: 'avif', label: 'AVIF', sub: '暂不可用', desc: '动态格式兼容性有限，暂不开放输出。', tone: 'disabled', disabled: true },
   { key: 'webp', label: 'WebP', sub: '均衡推荐', desc: '网页与分享场景兼容性和画质兼顾。', tone: 'blue' },
   { key: 'apng', label: 'APNG', sub: '高保真', desc: '适合透明与图形动画，视频体积偏大。', tone: 'purple' },
   { key: 'gif', label: 'GIF', sub: '兼容兜底', desc: '最通用，但颜色与流畅度牺牲明显。', tone: 'amber' }
@@ -77,7 +77,7 @@ const selectedSource = ref(null)
 const uploadBusy = ref(false)
 const loading = ref(true)
 const form = reactive({
-  formats: ['avif', 'webp'],
+  formats: ['webp'],
   preset: 'low',
   targetEnabled: true,
   targetMb: 10,
@@ -120,6 +120,8 @@ const statusText = computed(() => {
 let timer = null
 
 function toggleFormat(key) {
+  const item = formatCards.find((format) => format.key === key)
+  if (item?.disabled) return
   const exists = form.formats.includes(key)
   if (exists && form.formats.length === 1) {
     message.warning('至少保留一种输出格式')
@@ -277,10 +279,10 @@ onBeforeUnmount(() => clearInterval(timer))
         <div class="brand"><span class="brand-mark"></span> MotionMint</div>
         <div class="hero-copy">
           <h1>视频转动图 <span>更小，也更清晰</span></h1>
-          <p>四格式一站转换，设定容量上限后自动寻找更好的输出。</p>
+          <p>三种常用格式一站转换，设定容量上限后自动寻找更好的输出。</p>
         </div>
         <div class="hero-stat">
-          <span>4 种格式</span>
+          <span>3 种可用格式</span>
           <span>严格限容</span>
           <span>自动优化</span>
         </div>
@@ -340,11 +342,17 @@ onBeforeUnmount(() => clearInterval(timer))
               v-for="item in formatCards"
               :key="item.key"
               class="format-card"
-              :class="[item.tone, { selected: form.formats.includes(item.key) }]"
+              :class="[item.tone, { selected: form.formats.includes(item.key), disabled: item.disabled }]"
               type="button"
+              :disabled="item.disabled"
               @click="toggleFormat(item.key)"
             >
-              <n-checkbox :checked="form.formats.includes(item.key)" @click.stop @update:checked="toggleFormat(item.key)" />
+              <n-checkbox
+                :checked="form.formats.includes(item.key)"
+                :disabled="item.disabled"
+                @click.stop
+                @update:checked="toggleFormat(item.key)"
+              />
               <div class="format-heading">
                 <strong>{{ item.label }}</strong>
                 <span>{{ item.sub }}</span>
@@ -420,9 +428,9 @@ onBeforeUnmount(() => clearInterval(timer))
                   <n-input-number v-model:value="form.webpQuality" :min="0" :max="100" />
                 </div>
                 <div class="setting">
-                  <div class="label"><n-icon><flash-outline /></n-icon><b>AVIF CRF</b><span>越低质量越高</span></div>
-                  <div class="slider"><n-slider v-model:value="form.avifCrf" :min="0" :max="63" /></div>
-                  <n-input-number v-model:value="form.avifCrf" :min="0" :max="63" />
+                  <div class="label disabled-label"><n-icon><flash-outline /></n-icon><b>AVIF CRF</b><span>暂不开放</span></div>
+                  <div class="slider"><n-slider v-model:value="form.avifCrf" :min="0" :max="63" disabled /></div>
+                  <n-input-number v-model:value="form.avifCrf" :min="0" :max="63" disabled />
                 </div>
                 <div class="setting">
                   <div class="label"><n-icon><speedometer-outline /></n-icon><b>编码速度</b><span>越低压缩更精细</span></div>

@@ -284,6 +284,20 @@ button {
   box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.05);
 }
 
+.format-card.disabled,
+.format-card.disabled:hover {
+  border-color: #e8e8ed;
+  background: #f6f6f8;
+  color: #a2a2a8;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.format-card.disabled .format-heading span,
+.format-card.disabled p {
+  color: #a2a2a8;
+}
+
 .format-heading {
   display: flex;
   align-items: baseline;
@@ -426,6 +440,12 @@ button {
 .setting .label span {
   color: #8e8e93;
   font-size: 10px;
+}
+
+.setting .disabled-label,
+.setting .disabled-label .n-icon,
+.setting .disabled-label span {
+  color: #b2b2b7;
 }
 
 .actions {
