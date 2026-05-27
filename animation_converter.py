@@ -68,8 +68,8 @@ AVIF_AUTO_START_WIDTH = 1200
 AVIF_AUTO_START_FPS = 15
 AVIF_AUTO_MAX_WIDTH = 1600
 AVIF_AUTO_MAX_FPS = 20
-WEBP_AUTO_START_WIDTH = 1000
-WEBP_AUTO_START_FPS = 20
+WEBP_AUTO_START_WIDTH = 900
+WEBP_AUTO_START_FPS = 15
 WEBP_AUTO_QUALITY_DROP = 4
 
 
@@ -158,7 +158,9 @@ def supports_encoder(ffmpeg: str, name: str) -> bool:
     return completed.returncode == 0
 
 
-def run_command(command: list[str], cancel: threading.Event | None = None) -> None:
+def run_command(
+    command: list[str], cancel: threading.Event | None = None, cwd: Path | None = None
+) -> None:
     process = subprocess.Popen(
         command,
         stdout=subprocess.DEVNULL,
@@ -167,6 +169,7 @@ def run_command(command: list[str], cancel: threading.Event | None = None) -> No
         encoding="utf-8",
         errors="replace",
         creationflags=CREATE_NO_WINDOW,
+        cwd=str(cwd) if cwd else None,
     )
     while process.poll() is None:
         if cancel and cancel.wait(0.1):
@@ -230,8 +233,17 @@ class Converter:
         self.cancel = cancel or threading.Event()
         self.info = probe_video(source)
         self.ffmpeg = executable("ffmpeg")
+        self.img2webp = shutil.which("img2webp")
         self.has_svt_av1 = supports_encoder(self.ffmpeg, "libsvtav1")
         self.created_temp_files: list[Path] = []
+
+    def use_gradient_safe_webp(self) -> bool:
+        return bool(
+            self.img2webp
+            and self.settings.auto_optimize
+            and self.settings.target_bytes
+            and self.settings.target_bytes <= 20_000_000
+        )
 
     def convert_all(self) -> tuple[list[ConversionResult], Path | None]:
         self.settings.output_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +276,9 @@ class Converter:
                 if target_mb <= 10:
                     width = min(width, WEBP_AUTO_START_WIDTH)
                     fps = min(fps, WEBP_AUTO_START_FPS)
+                elif self.use_gradient_safe_webp():
+                    width = min(width, 1000)
+                    fps = min(fps, 20)
                 else:
                     width = min(width, 1200)
                     fps = min(fps, 24)
@@ -288,7 +303,10 @@ class Converter:
         self.log(f"\n[{label}] 开始转换")
         params = self.initial_params(fmt)
         if self.settings.target_bytes and self.settings.auto_optimize:
-            result = self.optimize_to_size(fmt, params, final_name)
+            if fmt == "webp" and self.use_gradient_safe_webp():
+                result = self.optimize_gradient_safe_webp(params, final_name)
+            else:
+                result = self.optimize_to_size(fmt, params, final_name)
         else:
             path = self.attempt_path(fmt, 1)
             self.encode(fmt, params, path)
@@ -345,6 +363,9 @@ class Converter:
             else:
                 command += ["-c:v", "apng", "-plays", "0", str(destination)]
         elif fmt == "webp":
+            if self.use_gradient_safe_webp():
+                self.encode_gradient_safe_webp(params, destination)
+                return
             compression = max(0, min(6, round(6 - params.speed * 6 / 8)))
             command = common + [
                 "-vf",
@@ -406,6 +427,89 @@ class Converter:
         else:
             raise ValueError(fmt)
         run_command(command, self.cancel)
+
+    def encode_gradient_safe_webp(self, params: EncodeParams, destination: Path) -> None:
+        assert self.img2webp is not None
+        fps = format_fps(params.fps)
+        frame_dir = self.settings.output_dir / (
+            f".{self.source.stem}.webp_frames_{params.width}_{fps.replace('.', '_')}"
+        )
+        shutil.rmtree(frame_dir, ignore_errors=True)
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            scale_filter = f"fps={fps},scale={params.width}:-2:flags=lanczos"
+            run_command(
+                [
+                    self.ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(self.source),
+                    "-vf",
+                    scale_filter,
+                    "-an",
+                    str(frame_dir / "frame_%04d.png"),
+                ],
+                self.cancel,
+            )
+            frames = sorted(frame_dir.glob("frame_*.png"))
+            if not frames:
+                raise RuntimeError("WebP 渐变保护无法生成中间帧。")
+            method = min(3, max(0, round(6 - params.speed * 6 / 8)))
+            duration = max(1, round(1000 / params.fps))
+            command = [
+                self.img2webp,
+                "-loop",
+                "0",
+                "-mixed",
+                "-sharp_yuv",
+                "-min_size",
+                "-q",
+                str(params.webp_quality),
+                "-m",
+                str(method),
+                "-d",
+                str(duration),
+                *[frame.name for frame in frames],
+                "-o",
+                str(destination.resolve()),
+            ]
+            run_command(command, self.cancel, frame_dir)
+        finally:
+            shutil.rmtree(frame_dir, ignore_errors=True)
+
+    def optimize_gradient_safe_webp(
+        self, start: EncodeParams, final_name: Path
+    ) -> ConversionResult:
+        target = self.settings.target_bytes
+        assert target is not None
+        params = start
+        self.log("[WebP] 启用渐变保护编码，优先避免暗部和渐变背景出现方块")
+        for attempt in range(1, 4):
+            path = self.attempt_path("webp", attempt)
+            self.log(
+                f"[WebP] 渐变保护试压 {attempt}：{params.width} px / "
+                f"{format_fps(params.fps)} fps / 质量 {params.webp_quality}"
+            )
+            self.encode("webp", params, path)
+            size = path.stat().st_size
+            self.log(f"[WebP] 试压结果：{format_bytes(size)}")
+            result = ConversionResult("webp", path, size, params)
+            if size <= target:
+                self.log("[WebP] 已保留体积余量，用于维持渐变平滑度")
+                self.commit_result(result, final_name)
+                result.path = final_name
+                return result
+            factor = min(0.92, max(0.60, math.sqrt(target / size) * 0.94))
+            width = even_width(params.width * factor)
+            fps = params.fps if factor >= 0.85 else max(8.0, round(params.fps * factor))
+            params = replace(params, width=width, fps=fps)
+        raise RuntimeError(
+            f"WebP 渐变保护模式无法压到 {format_bytes(target)} 以内，"
+            "请进一步降低最大宽度或帧率。"
+        )
 
     def optimize_to_size(
         self, fmt: str, start: EncodeParams, final_name: Path

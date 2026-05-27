@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ANIMATION_DATA_DIR=/data
 
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg tk \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg tk webp \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

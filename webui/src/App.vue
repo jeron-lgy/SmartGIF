@@ -61,7 +61,7 @@ const { message } = createDiscreteApi(['message'], {
 
 const formatCards = [
   { key: 'avif', label: 'AVIF', sub: '暂不可用', desc: '动态格式兼容性有限，暂不开放输出。', tone: 'disabled', disabled: true },
-  { key: 'webp', label: 'WebP', sub: '均衡推荐', desc: '网页与分享场景兼容性和画质兼顾。', tone: 'blue' },
+  { key: 'webp', label: 'WebP', sub: '均衡推荐', desc: '自动保护渐变，兼顾兼容性和画质。', tone: 'blue' },
   { key: 'apng', label: 'APNG', sub: '高保真', desc: '适合透明与图形动画，视频体积偏大。', tone: 'purple' },
   { key: 'gif', label: 'GIF', sub: '兼容兜底', desc: '最通用，但颜色与流畅度牺牲明显。', tone: 'amber' }
 ]
