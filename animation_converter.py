@@ -68,6 +68,9 @@ AVIF_AUTO_START_WIDTH = 1200
 AVIF_AUTO_START_FPS = 15
 AVIF_AUTO_MAX_WIDTH = 1600
 AVIF_AUTO_MAX_FPS = 20
+WEBP_AUTO_START_WIDTH = 1000
+WEBP_AUTO_START_FPS = 20
+WEBP_AUTO_QUALITY_DROP = 4
 
 
 @dataclass(frozen=True)
@@ -258,8 +261,12 @@ class Converter:
                 width = min(width, 560)
                 fps = min(fps, 10)
             elif fmt == "webp" and target_mb <= 20:
-                width = min(width, 1200)
-                fps = min(fps, 24)
+                if target_mb <= 10:
+                    width = min(width, WEBP_AUTO_START_WIDTH)
+                    fps = min(fps, WEBP_AUTO_START_FPS)
+                else:
+                    width = min(width, 1200)
+                    fps = min(fps, 24)
             elif fmt == "avif":
                 width = min(width, AVIF_AUTO_MAX_WIDTH)
                 fps = min(fps, AVIF_AUTO_MAX_FPS)
@@ -345,6 +352,8 @@ class Converter:
                 "-an",
                 "-c:v",
                 "libwebp_anim",
+                "-preset",
+                "picture",
                 "-q:v",
                 str(params.webp_quality),
                 "-compression_level",
@@ -412,6 +421,11 @@ class Converter:
             self.log(
                 f"[AVIF] 自动限容使用{encoder_note}，寻优上限为 "
                 f"{cap_width} px / {format_fps(cap_fps)} fps"
+            )
+        elif fmt == "webp":
+            quality_floor = max(0, self.settings.webp_quality - WEBP_AUTO_QUALITY_DROP)
+            self.log(
+                f"[WebP] 自动限容优先保留平滑细节，质量不低于 {quality_floor}"
             )
         params = start
         best: ConversionResult | None = None
@@ -502,11 +516,10 @@ class Converter:
         seen: set[tuple[int, float, int, int, int]],
     ) -> EncodeParams | None:
         if fmt == "webp" and over.webp_quality > best.webp_quality + 1:
-            options = range(over.webp_quality - 1, best.webp_quality, -1)
-            for quality in options:
-                candidate = replace(best, webp_quality=quality)
-                if candidate.key() not in seen:
-                    return candidate
+            quality = (best.webp_quality + over.webp_quality) // 2
+            candidate = replace(best, webp_quality=quality)
+            if candidate.key() not in seen:
+                return candidate
         if fmt == "avif" and over.avif_crf < best.avif_crf - 1:
             options = range(over.avif_crf + 1, best.avif_crf)
             for crf in options:
@@ -525,7 +538,7 @@ class Converter:
 
     def downgrade(self, fmt: str, params: EncodeParams, size: int, target: int) -> EncodeParams:
         ratio = size / target
-        webp_floor = max(38, self.settings.webp_quality - 20)
+        webp_floor = max(0, self.settings.webp_quality - WEBP_AUTO_QUALITY_DROP)
         avif_ceiling = min(52, self.settings.avif_crf + 14)
         if fmt == "webp" and params.webp_quality > webp_floor and ratio < 2.2:
             decrement = max(5, min(18, int((ratio - 1) * 22) + 5))
