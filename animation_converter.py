@@ -18,9 +18,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-
 
 APP_TITLE = "动图压制转换器"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -28,6 +25,19 @@ VIDEO_TYPES = [
     ("视频文件", "*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.flv"),
     ("所有文件", "*.*"),
 ]
+
+
+def load_tkinter() -> None:
+    global filedialog, messagebox, tk, ttk
+    import tkinter as tk_module
+    from tkinter import filedialog as filedialog_module
+    from tkinter import messagebox as messagebox_module
+    from tkinter import ttk as ttk_module
+
+    tk = tk_module
+    filedialog = filedialog_module
+    messagebox = messagebox_module
+    ttk = ttk_module
 FORMAT_LABELS = {
     "gif": "GIF",
     "webp": "WebP",
@@ -1007,6 +1017,7 @@ def main() -> int:
     parser.add_argument("--no-preview", action="store_true", help="不生成对比预览页。")
     arguments = parser.parse_args()
     if not arguments.input:
+        load_tkinter()
         root = tk.Tk()
         ttk.Style(root).theme_use("vista" if "vista" in ttk.Style(root).theme_names() else "clam")
         ConverterApp(root)

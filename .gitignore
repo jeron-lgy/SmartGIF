@@ -23,6 +23,10 @@ __pycache__/
 /webui/node_modules/
 /webui/.vite/
 
+# Release packaging cache and generated archives
+/.release-cache/
+/release-assets/
+
 # Local editor and OS files
 .DS_Store
 Thumbs.db
