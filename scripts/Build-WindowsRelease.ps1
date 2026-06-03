@@ -18,6 +18,36 @@ $PythonUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVer
 $FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 $WebpVersion = "1.6.0"
 $WebpUrl = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$WebpVersion-windows-x64.zip"
+$LauncherExe = Join-Path $CacheDir "launcher-dist\SmartGIF.exe"
+
+function Build-Launcher {
+    $source = Join-Path $Root "launcher\smartgif_launcher.py"
+    if (-not (Test-Path -LiteralPath $source)) {
+        throw "Missing launcher source: $source"
+    }
+
+    Remove-Item -LiteralPath (Join-Path $CacheDir "launcher-dist") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $CacheDir "launcher-build") -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $CacheDir "launcher-spec") -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+
+    & python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --onefile `
+        --windowed `
+        --name SmartGIF `
+        --distpath (Join-Path $CacheDir "launcher-dist") `
+        --workpath (Join-Path $CacheDir "launcher-build") `
+        --specpath (Join-Path $CacheDir "launcher-spec") `
+        $source
+    if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller failed to build SmartGIF.exe"
+    }
+    if (-not (Test-Path -LiteralPath $LauncherExe)) {
+        throw "Launcher build did not produce $LauncherExe"
+    }
+}
 
 function Invoke-Download {
     param(
@@ -44,7 +74,10 @@ function Invoke-Download {
 }
 
 function Copy-AppFiles {
-    param([Parameter(Mandatory = $true)][string]$Destination)
+    param(
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [switch]$IncludeLauncher
+    )
 
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     $patterns = @(
@@ -55,6 +88,9 @@ function Copy-AppFiles {
     )
     foreach ($pattern in $patterns) {
         Copy-Item -Path (Join-Path $Root $pattern) -Destination $Destination -Force
+    }
+    if ($IncludeLauncher) {
+        Copy-Item -LiteralPath $LauncherExe -Destination (Join-Path $Destination "SmartGIF.exe") -Force
     }
     $webuiDir = Join-Path $Destination "webui"
     New-Item -ItemType Directory -Force -Path $webuiDir | Out-Null
@@ -150,6 +186,7 @@ function New-Zip {
 
 Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+Build-Launcher
 
 Copy-AppFiles -Destination $StandardDir
 Write-Lines -Path (Join-Path $StandardDir "Windows-Standard-README.md") -Lines @(
@@ -165,16 +202,17 @@ Write-Lines -Path (Join-Path $StandardDir "Windows-Standard-README.md") -Lines @
     "Double-click the .cmd launcher, then open http://localhost:8765."
 )
 
-Copy-AppFiles -Destination $EasyDir
+Copy-AppFiles -Destination $EasyDir -IncludeLauncher
 Prepare-Runtime -Destination $EasyDir
 Write-Lines -Path (Join-Path $EasyDir "Windows-Easy-OneClick-README.md") -Lines @(
     "# SmartGIF Windows Easy OneClick",
     "",
     "This package bundles Python, FFmpeg, ffprobe, and img2webp.",
+    "It also includes SmartGIF.exe for one-click launch.",
     "",
     "Usage:",
     "1. Extract the whole folder.",
-    "2. Double-click the .cmd launcher.",
+    "2. Double-click SmartGIF.exe.",
     "3. Open http://localhost:8765.",
     "",
     "The launcher only prepends local runtime paths for this process and does not change system PATH."
