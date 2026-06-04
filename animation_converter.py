@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -181,12 +182,25 @@ def run_command(
         creationflags=CREATE_NO_WINDOW,
         cwd=str(cwd) if cwd else None,
     )
+    stderr_tail: deque[str] = deque(maxlen=20)
+
+    def drain_stderr() -> None:
+        if not process.stderr:
+            return
+        for line in process.stderr:
+            line = line.strip()
+            if line:
+                stderr_tail.append(line)
+
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_thread.start()
     while process.poll() is None:
         if cancel and cancel.wait(0.1):
             process.terminate()
             process.wait(timeout=5)
             raise CancelledError("操作已取消。")
-    stderr = process.stderr.read() if process.stderr else ""
+    stderr_thread.join(timeout=1)
+    stderr = "\n".join(stderr_tail)
     if process.returncode != 0:
         detail = stderr.strip().splitlines()[-1] if stderr.strip() else "未知错误"
         raise RuntimeError(f"FFmpeg 转换失败：{detail}")
@@ -448,6 +462,7 @@ class Converter:
         frame_dir.mkdir(parents=True, exist_ok=True)
         try:
             scale_filter = f"fps={fps},scale={params.width}:-2:flags=lanczos"
+            self.log(f"[WebP] 正在抽取中间帧：{params.width} px / {fps} fps")
             run_command(
                 [
                     self.ffmpeg,
@@ -467,6 +482,7 @@ class Converter:
             frames = sorted(frame_dir.glob("frame_*.png"))
             if not frames:
                 raise RuntimeError("WebP 渐变保护无法生成中间帧。")
+            self.log(f"[WebP] 已生成 {len(frames)} 张中间帧，开始合成 WebP")
             method = min(3, max(0, round(6 - params.speed * 6 / 8)))
             duration = max(1, round(1000 / params.fps))
             command = [
